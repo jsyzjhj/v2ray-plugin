@@ -15,28 +15,33 @@ import (
 	"fmt"
 	"unsafe"
 
-	alog "v2ray.com/core/app/log"
+	alog "github.com/v2fly/v2ray-core/v4/app/log"
 
-	"v2ray.com/core/common"
-	"v2ray.com/core/common/log"
-	"v2ray.com/core/common/serial"
+	"github.com/v2fly/v2ray-core/v4/common"
+	"github.com/v2fly/v2ray-core/v4/common/log"
+	"github.com/v2fly/v2ray-core/v4/common/serial"
 )
 
 var (
 	ctag = C.CString("v2ray")
 )
 
-type androidLogger struct {}
+type androidLogger struct{}
+
 func (l *androidLogger) Handle(msg log.Message) {
-	var priority = C.ANDROID_LOG_FATAL	// this value should never be used in client mode
+	var priority = C.ANDROID_LOG_FATAL // this value should never be used in client mode
 	var message string
 	switch msg := msg.(type) {
 	case *log.GeneralMessage:
 		switch msg.Severity {
-		case log.Severity_Error:   priority = C.ANDROID_LOG_ERROR
-		case log.Severity_Warning: priority = C.ANDROID_LOG_WARN
-		case log.Severity_Info:    priority = C.ANDROID_LOG_INFO
-		case log.Severity_Debug:   priority = C.ANDROID_LOG_DEBUG
+		case log.Severity_Error:
+			priority = C.ANDROID_LOG_ERROR
+		case log.Severity_Warning:
+			priority = C.ANDROID_LOG_WARN
+		case log.Severity_Info:
+			priority = C.ANDROID_LOG_INFO
+		case log.Severity_Debug:
+			priority = C.ANDROID_LOG_DEBUG
 		}
 		message = serial.ToString(msg.Content)
 	default:
