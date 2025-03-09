@@ -1,7 +1,5 @@
 package main
 
-//go:generate errorgen
-
 import (
 	"flag"
 	"fmt"
@@ -14,37 +12,32 @@ import (
 	"syscall"
 
 	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 
-	"v2ray.com/core"
+	_ "github.com/v2fly/v2ray-core/v5/app/proxyman/inbound"
+	_ "github.com/v2fly/v2ray-core/v5/app/proxyman/outbound"
 
-	"v2ray.com/core/app/dispatcher"
-	"v2ray.com/core/app/proxyman"
-	_ "v2ray.com/core/app/proxyman/inbound"
-	_ "v2ray.com/core/app/proxyman/outbound"
+	core "github.com/v2fly/v2ray-core/v5"
+	vlog "github.com/v2fly/v2ray-core/v5/app/log"
+	clog "github.com/v2fly/v2ray-core/v5/common/log"
 
-	"v2ray.com/core/common/net"
-	"v2ray.com/core/common/protocol"
-	"v2ray.com/core/common/serial"
-
-	"v2ray.com/core/proxy/dokodemo"
-	"v2ray.com/core/proxy/freedom"
-
-	"v2ray.com/core/transport/internet"
-	"v2ray.com/core/transport/internet/quic"
-	"v2ray.com/core/transport/internet/tls"
-	"v2ray.com/core/transport/internet/websocket"
-
-	vlog "v2ray.com/core/app/log"
-	clog "v2ray.com/core/common/log"
-
-	"v2ray.com/core/common/platform/filesystem"
+	"github.com/v2fly/v2ray-core/v5/app/dispatcher"
+	"github.com/v2fly/v2ray-core/v5/app/proxyman"
+	"github.com/v2fly/v2ray-core/v5/common/net"
+	"github.com/v2fly/v2ray-core/v5/common/platform/filesystem"
+	"github.com/v2fly/v2ray-core/v5/common/protocol"
+	"github.com/v2fly/v2ray-core/v5/common/serial"
+	"github.com/v2fly/v2ray-core/v5/proxy/dokodemo"
+	"github.com/v2fly/v2ray-core/v5/proxy/freedom"
+	"github.com/v2fly/v2ray-core/v5/transport/internet"
+	"github.com/v2fly/v2ray-core/v5/transport/internet/quic"
+	"github.com/v2fly/v2ray-core/v5/transport/internet/tls"
+	"github.com/v2fly/v2ray-core/v5/transport/internet/websocket"
 )
 
 var (
 	VERSION = "custom"
-)
 
-var (
 	vpn        = flag.Bool("V", false, "Run in VPN mode.")
 	fastOpen   = flag.Bool("fast-open", false, "Enable TCP fast open.")
 	localAddr  = flag.String("localAddr", "127.0.0.1", "local address to listen on.")
@@ -62,6 +55,7 @@ var (
 	server     = flag.Bool("server", false, "Run in server mode")
 	logLevel   = flag.String("loglevel", "", "loglevel for v2ray: debug, info, warning (default), error, none.")
 	version    = flag.Bool("version", false, "Show current version of v2ray-plugin")
+	fwmark     = flag.Int("fwmark", 0, "Set SO_MARK option for outbound sockets.")
 )
 
 func homeDir() string {
@@ -80,7 +74,7 @@ func readCertificate() ([]byte, error) {
 	if *certRaw != "" {
 		certHead := "-----BEGIN CERTIFICATE-----"
 		certTail := "-----END CERTIFICATE-----"
-		fixedCert := certHead + "\n" + (*certRaw)[len(certHead):len(*certRaw)-len(certTail)] + "\n" + certTail
+		fixedCert := certHead + "\n" + *certRaw + "\n" + certTail
 		return []byte(fixedCert), nil
 	}
 	panic("thou shalt not reach hear")
@@ -88,21 +82,20 @@ func readCertificate() ([]byte, error) {
 
 func logConfig(logLevel string) *vlog.Config {
 	config := &vlog.Config{
-		ErrorLogLevel: clog.Severity_Warning,
-		ErrorLogType:  vlog.LogType_Console,
-		AccessLogType: vlog.LogType_Console,
+		Error:  &vlog.LogSpecification{Type: vlog.LogType_Console, Level: clog.Severity_Warning},
+		Access: &vlog.LogSpecification{Type: vlog.LogType_Console},
 	}
 	level := strings.ToLower(logLevel)
 	switch level {
 	case "debug":
-		config.ErrorLogLevel = clog.Severity_Debug
+		config.Error.Level = clog.Severity_Debug
 	case "info":
-		config.ErrorLogLevel = clog.Severity_Info
+		config.Error.Level = clog.Severity_Info
 	case "error":
-		config.ErrorLogLevel = clog.Severity_Error
+		config.Error.Level = clog.Severity_Error
 	case "none":
-		config.ErrorLogType = vlog.LogType_None
-		config.AccessLogType = vlog.LogType_None
+		config.Error.Type = vlog.LogType_None
+		config.Access.Type = vlog.LogType_None
 	}
 	return config
 }
@@ -158,8 +151,16 @@ func generateConfig() (*core.Config, error) {
 			Settings:     serial.ToTypedMessage(transportSettings),
 		}},
 	}
-	if *fastOpen {
-		streamConfig.SocketSettings = &internet.SocketConfig{Tfo: internet.SocketConfig_Enable}
+	if *fastOpen || *fwmark != 0 {
+		socketConfig := &internet.SocketConfig{}
+		if *fastOpen {
+			socketConfig.Tfo = internet.SocketConfig_Enable
+		}
+		if *fwmark != 0 {
+			socketConfig.Mark = uint32(*fwmark)
+		}
+
+		streamConfig.SocketSettings = socketConfig
 	}
 	if *tlsEnabled {
 		tlsConfig := tls.Config{ServerName: *host}
@@ -191,10 +192,10 @@ func generateConfig() (*core.Config, error) {
 			tlsConfig.Certificate = []*tls.Certificate{&certificate}
 		}
 		streamConfig.SecurityType = serial.GetMessageType(&tlsConfig)
-		streamConfig.SecuritySettings = []*serial.TypedMessage{serial.ToTypedMessage(&tlsConfig)}
+		streamConfig.SecuritySettings = []*anypb.Any{serial.ToTypedMessage(&tlsConfig)}
 	}
 
-	apps := []*serial.TypedMessage{
+	apps := []*anypb.Any{
 		serial.ToTypedMessage(&dispatcher.Config{}),
 		serial.ToTypedMessage(&proxyman.InboundConfig{}),
 		serial.ToTypedMessage(&proxyman.OutboundConfig{}),
@@ -258,10 +259,6 @@ func generateConfig() (*core.Config, error) {
 }
 
 func startV2Ray() (core.Server, error) {
-
-	if *vpn {
-		registerControlFunc()
-	}
 
 	opts, err := parseEnv()
 
@@ -327,6 +324,26 @@ func startV2Ray() (core.Server, error) {
 			} else {
 				*remotePort = c
 			}
+		}
+
+		if _, b := opts.Get("fastOpen"); b {
+			*fastOpen = true
+		}
+
+		if _, b := opts.Get("__android_vpn"); b {
+			*vpn = true
+		}
+
+		if c, b := opts.Get("fwmark"); b {
+			if i, err := strconv.Atoi(c); err == nil {
+				*fwmark = i
+			} else {
+				logWarn("failed to parse fwmark, use default value")
+			}
+		}
+
+		if *vpn {
+			registerControlFunc()
 		}
 	}
 
